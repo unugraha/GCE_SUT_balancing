@@ -1,21 +1,20 @@
 # ============================================================
-# GCE SUT BALANCING - 10-STEP AUTOMATIC PROCEDURE
+# GCE SUT BALANCING - 8-STEP AUTOMATIC PROCEDURE
+# Version: dual formulation (Newton) in Step 8
 # Generalized Cross-Entropy (GCE) balancing for Supply-Use Tables
 # ============================================================
 #
-# 10-STEP ALGORITHM
-# -----------------
+# 8-STEP ALGORITHM
+# ----------------
 #
 # STEP 1  : INPUT & DATA PREPARATION
 # STEP 2  : ORIENTATION & CONSISTENCY CHECK
 # STEP 3  : DEFINE GCE SUPPORT POINTS
 # STEP 4  : FEASIBILITY SCREENING
-# STEP 5  : FIND FEASIBLE BALANCED MATRIX (LP / GLPK)
-# STEP 6  : CONSTRUCT FEASIBLE INITIAL PROBABILITIES (P0)
-# STEP 7  : SPECIFY PRIOR PROBABILITIES & GCE OBJECTIVE
-# STEP 8  : GCE CONSTRAINED OPTIMIZATION (SLSQP)
-# STEP 9  : DERIVE & VERIFY BALANCED SUT
-# STEP 10 : UNCERTAINTY, RELIABILITY & OUTPUT DIAGNOSTICS
+# STEP 5  : SPECIFY PRIOR PROBABILITIES & GCE OBJECTIVE
+# STEP 6  : GCE OPTIMIZATION (DUAL FORMULATION, NEWTON)
+# STEP 7  : DERIVE & VERIFY BALANCED SUT
+# STEP 8  : UNCERTAINTY, RELIABILITY & OUTPUT DIAGNOSTICS
 
 rm(list = ls())
 
@@ -51,15 +50,14 @@ rm(list = ls())
 # ============================================================
 
 cat("\n============================================================\n")
-cat("GCE SUT BALANCING - 10 STEP AUTOMATIC PROCEDURE\n")
+cat("GCE SUT BALANCING - 8 STEP AUTOMATIC PROCEDURE\n")
 cat("============================================================\n")
-cat("STEP 1/10 - INPUT & DATA PREPARATION\n")
+cat("STEP 1/8 - INPUT & DATA PREPARATION\n")
 
 required_packages <- c(
   "readxl",
   "writexl",
-  "Rglpk",
-  "nloptr"
+  "MASS"
 )
 
 for (pkg in required_packages) {
@@ -70,8 +68,6 @@ for (pkg in required_packages) {
 
 library(readxl)
 library(writexl)
-library(Rglpk)
-library(nloptr)
 
 # ------------------------------------------------------------
 # File settings
@@ -189,7 +185,7 @@ cat(
 # ============================================================
 
 cat("\n------------------------------------------------------------\n")
-cat("STEP 2/10 - ORIENTATION & CONSISTENCY CHECK\n")
+cat("STEP 2/8 - ORIENTATION & CONSISTENCY CHECK\n")
 
 # ------------------------------------------------------------
 # Extract target vectors
@@ -429,7 +425,7 @@ cat("  Consistency checks passed.\n")
 # ============================================================
 
 cat("\n------------------------------------------------------------\n")
-cat("STEP 3/10 - DEFINE GCE SUPPORT POINTS\n")
+cat("STEP 3/8 - DEFINE GCE SUPPORT POINTS\n")
 
 M <- 3
 
@@ -475,13 +471,14 @@ cat("  Number of SUT cells :", N, "\n")
 #   cell based on its support points, then perform an aggregate
 #   screening of row and column targets.
 #
-# This is a preliminary screening only. The formal feasibility
-# test is performed in STEP 5 using GLPK.
+# This screening gives a necessary (not sufficient) condition
+# for feasibility. Matrix-level feasibility is revealed by the
+# convergence of the GCE optimization in STEP 6.
 #
 # ============================================================
 
 cat("\n------------------------------------------------------------\n")
-cat("STEP 4/10 - FEASIBILITY SCREENING\n")
+cat("STEP 4/8 - FEASIBILITY SCREENING\n")
 
 lower_x <- matrix(
   NA_real_,
@@ -545,272 +542,19 @@ if (any(col_screen_fail)) {
   )
 }
 
+if (any(row_screen_fail) || any(col_screen_fail)) {
+  stop(
+    "Feasibility screening failed: some targets lie outside ",
+    "the range attainable from the support points. ",
+    "Revise R or the targets."
+  )
+}
+
 cat("  Feasibility screening completed.\n")
 
 
 # ============================================================
-# STEP 5 - FIND FEASIBLE BALANCED MATRIX
-#           USING LINEAR PROGRAMMING (GLPK)
-# ============================================================
-#
-# Objective:
-#   Find ANY matrix X_feasible satisfying:
-#
-#       sum_j X_ij = ROW_TARGET_i
-#       sum_i X_ij = COL_TARGET_j
-#
-#   subject to:
-#
-#       lower_x <= X <= upper_x
-#
-# The LP objective is zero. Therefore, GLPK is not yet doing
-# GCE. It is only finding a feasible point that can be used
-# as the starting point for the nonlinear GCE optimization.
-#
-# ============================================================
-
-cat("\n------------------------------------------------------------\n")
-cat("STEP 5/10 - FIND FEASIBLE BALANCED MATRIX (LP / GLPK)\n")
-
-# Construct equality constraint matrix
-Aeq <- matrix(
-  0,
-  nrow = n + k,
-  ncol = N
-)
-
-# Row constraints
-for (i in 1:n) {
-
-  for (j in 1:k) {
-
-    Aeq[
-      i,
-      idx(i, j)
-    ] <- 1
-  }
-}
-
-# Column constraints
-for (j in 1:k) {
-
-  for (i in 1:n) {
-
-    Aeq[
-      n + j,
-      idx(i, j)
-    ] <- 1
-  }
-}
-
-rhs <- c(
-  row_target,
-  col_target
-)
-
-lb_x <- as.vector(lower_x)
-ub_x <- as.vector(upper_x)
-
-cat("  Solving feasibility LP with GLPK...\n")
-
-lp_result <- Rglpk_solve_LP(
-  obj = rep(0, N),
-  mat = Aeq,
-  dir = rep("==", n + k),
-  rhs = rhs,
-  bounds = list(
-    lower = list(
-      ind = seq_len(N),
-      val = lb_x
-    ),
-    upper = list(
-      ind = seq_len(N),
-      val = ub_x
-    )
-  ),
-  max = FALSE
-)
-
-if (lp_result$status != 0) {
-
-  stop(
-    paste0(
-      "GLPK could not find a feasible starting point. ",
-      "GLPK status = ",
-      lp_result$status,
-      ".\n",
-      "Check support bounds and row/column targets."
-    )
-  )
-}
-
-X_feasible <- matrix(
-  lp_result$solution,
-  nrow = n,
-  ncol = k
-)
-
-# Verify LP solution
-row_resid_lp <-
-  rowSums(X_feasible) - row_target
-
-col_resid_lp <-
-  colSums(X_feasible) - col_target
-
-max_row_resid_lp <-
-  max(abs(row_resid_lp))
-
-max_col_resid_lp <-
-  max(abs(col_resid_lp))
-
-cat(
-  "  GLPK status                         :",
-  lp_result$status,
-  "\n"
-)
-
-cat(
-  "  Maximum absolute row residual       :",
-  max_row_resid_lp,
-  "\n"
-)
-
-cat(
-  "  Maximum absolute column residual    :",
-  max_col_resid_lp,
-  "\n"
-)
-
-if (
-  max_row_resid_lp > 1e-7 ||
-  max_col_resid_lp > 1e-7
-) {
-  stop("GLPK solution failed row/column verification.")
-}
-
-cat("  Feasible balanced matrix obtained.\n")
-
-
-# ============================================================
-# STEP 6 - CONSTRUCT FEASIBLE INITIAL PROBABILITIES (P0)
-# ============================================================
-#
-# Objective:
-#   Convert the feasible X into probability distributions
-#   over the GCE support points.
-#
-# For each cell:
-#
-#   X_ij = sum_m p_ijm b_ijm
-#
-# and:
-#
-#   sum_m p_ijm = 1
-#
-# The resulting P0 is a feasible starting point for the
-# constrained GCE optimization.
-#
-# ============================================================
-
-cat("\n------------------------------------------------------------\n")
-cat("STEP 6/10 - CONSTRUCT FEASIBLE INITIAL PROBABILITIES (P0)\n")
-
-P0 <- array(
-  0,
-  dim = c(n, k, M)
-)
-
-tol <- 1e-12
-
-for (i in 1:n) {
-
-  for (j in 1:k) {
-
-    b1 <- B[i, j, 1]
-    b2 <- B[i, j, 2]
-    b3 <- B[i, j, 3]
-
-    x <- X_feasible[i, j]
-
-    # If the support has zero width, all probability
-    # is assigned to the initial support.
-    if (abs(b3 - b1) < tol) {
-
-      P0[i, j, 1] <- 0
-      P0[i, j, 2] <- 1
-      P0[i, j, 3] <- 0
-
-    } else {
-
-      # Interpolate between lower and upper support.
-      p3 <- (x - b1) / (b3 - b1)
-
-      p3 <- max(
-        0,
-        min(1, p3)
-      )
-
-      P0[i, j, 1] <- 1 - p3
-      P0[i, j, 2] <- 0
-      P0[i, j, 3] <- p3
-    }
-  }
-}
-
-# Verify that P0 reproduces X_feasible
-P0_X <- array(
-  0,
-  dim = c(n, k, M)
-)
-
-for (m in 1:M) {
-
-  P0_X[, , m] <-
-    P0[, , m] * B[, , m]
-}
-
-X0 <- apply(
-  P0_X,
-  c(1, 2),
-  sum
-)
-
-max_P0_X_error <-
-  max(abs(X0 - X_feasible))
-
-max_P0_row_error <-
-  max(abs(rowSums(X0) - row_target))
-
-max_P0_col_error <-
-  max(abs(colSums(X0) - col_target))
-
-cat(
-  "  Maximum |X0 - X_feasible| :",
-  max_P0_X_error,
-  "\n"
-)
-
-cat(
-  "  Maximum row residual      :",
-  max_P0_row_error,
-  "\n"
-)
-
-cat(
-  "  Maximum column residual   :",
-  max_P0_col_error,
-  "\n"
-)
-
-if (max_P0_X_error > 1e-8) {
-  stop("P0 does not reproduce the feasible X.")
-}
-
-cat("  Feasible starting probability distribution P0 obtained.\n")
-
-
-# ============================================================
-# STEP 7 - SPECIFY PRIOR PROBABILITIES & GCE OBJECTIVE
+# STEP 5 - SPECIFY PRIOR PROBABILITIES & GCE OBJECTIVE
 # ============================================================
 #
 # Objective:
@@ -829,12 +573,12 @@ cat("  Feasible starting probability distribution P0 obtained.\n")
 #   D(P||Q)
 #   = sum p_ijm log(p_ijm / q_ijm)
 #
-# subject to the balancing constraints in STEP 8.
+# subject to the balancing constraints in STEP 6.
 #
 # ============================================================
 
 cat("\n------------------------------------------------------------\n")
-cat("STEP 7/10 - PRIOR PROBABILITIES & GCE OBJECTIVE\n")
+cat("STEP 5/8 - PRIOR PROBABILITIES & GCE OBJECTIVE\n")
 
 # Spike prior
 Q <- array(
@@ -846,7 +590,6 @@ Q[, , 1] <- 0.025
 Q[, , 2] <- 0.950
 Q[, , 3] <- 0.025
 
-P0_vec <- as.vector(P0)
 Q_vec  <- as.vector(Q)
 
 # Numerical floor used ONLY inside logarithms.
@@ -886,317 +629,207 @@ cat("  GCE objective = KL divergence / cross-entropy criterion.\n")
 
 
 # ============================================================
-# STEP 8 - GCE CONSTRAINED OPTIMIZATION
-#           USING SLSQP / NLOPTR
+# STEP 6 - GCE OPTIMIZATION USING THE DUAL FORMULATION
+#           (NEWTON'S METHOD)
 # ============================================================
 #
 # Objective:
 #   Find posterior probabilities P that are as close as possible
 #   to the prior Q while satisfying all balancing constraints.
 #
-# Constraints:
+# Primal problem (same as in the SLSQP version):
 #
-#   A. For every cell:
-#        sum_m p_ijm = 1
+#   min  D(P||Q) = sum_ijm p_ijm log(p_ijm / q_ijm)
 #
-#   B. Row constraints:
-#        sum_j sum_m p_ijm b_ijm = ROW_TARGET_i
+#   s.t. sum_m p_ijm = 1                        (every cell)
+#        sum_j sum_m p_ijm b_ijm = ROW_TARGET_i  (rows)
+#        sum_i sum_m p_ijm b_ijm = COL_TARGET_j  (columns)
 #
-#   C. Column constraints:
-#        sum_i sum_m p_ijm b_ijm = COL_TARGET_j
+# Solution via Lagrange multipliers:
+#   lambda_i for each row constraint and mu_j for each column
+#   constraint. The optimal probabilities have the closed form
 #
-# Probability bounds:
+#   p_ijm = q_ijm * exp((lambda_i + mu_j) * b_ijm) / Omega_ij
 #
-#        0 <= p_ijm <= 1
+#   Omega_ij = sum_m q_ijm * exp((lambda_i + mu_j) * b_ijm)
+#
+#   so the adding-up constraint sum_m p_ijm = 1 holds by
+#   construction. lambda and mu minimise the unconstrained,
+#   convex dual function
+#
+#   L(lambda, mu) = sum_ij log(Omega_ij)
+#                   - sum_i lambda_i ROW_TARGET_i
+#                   - sum_j mu_j     COL_TARGET_j
+#
+#   Gradient of L = row and column residuals.
+#   Hessian of L  = built from the posterior variance of each
+#                   cell.
+#
+# Only n + k multipliers are estimated (here 7 + 16 = 23)
+# instead of n * k * M probabilities (here 336). Because the
+# dual is convex, Newton's method converges to the unique
+# optimum regardless of the starting point, so no feasible
+# starting matrix is required.
+#
+# Feasibility: if no matrix satisfies all row, column and
+# support constraints simultaneously, the dual has no minimum.
+# The residuals then fail to vanish, the multipliers grow
+# without bound, and the script stops with a warning. In that
+# case R or the targets should be revised (see Step 3).
 #
 # ============================================================
 
 cat("\n------------------------------------------------------------\n")
-cat("STEP 8/10 - GCE CONSTRAINED OPTIMIZATION (SLSQP)\n")
-
-n_constraints <- N + n + k
-n_variables <- N * M
+cat("STEP 6/8 - GCE OPTIMIZATION (DUAL / NEWTON)\n")
 
 # ------------------------------------------------------------
-# Equality constraints
+# Scaling: support values are divided by a constant so that
+# exp() does not overflow. The solution is unaffected.
 # ------------------------------------------------------------
 
-eval_g_eq <- function(p) {
+sc <- max(1, max(abs(B)) / 10)
 
-  P <- array(
-    p,
-    dim = c(n, k, M)
+Bs   <- B / sc
+rt_s <- row_target / sc
+ct_s <- col_target / sc
+
+# Posterior probabilities for given multipliers theta = (lambda, mu)
+posterior <- function(theta) {
+
+  lambda <- theta[1:n]
+  mu     <- theta[(n + 1):(n + k)]
+
+  Z <- outer(lambda, mu, "+")
+
+  E <- array(0, dim = c(n, k, M))
+
+  for (m in 1:M) {
+    E[, , m] <- Z * Bs[, , m]
+  }
+
+  # log-sum-exp stabilization: subtract the cell maximum before
+  # exponentiating, so that exp() can neither overflow nor
+  # underflow
+  E_max <- apply(E, c(1, 2), max)
+
+  for (m in 1:M) {
+    E[, , m] <- Q[, , m] * exp(E[, , m] - E_max)
+  }
+
+  Omega <- apply(E, c(1, 2), sum)
+
+  list(
+    P         = sweep(E, c(1, 2), Omega, "/"),
+    log_Omega = log(Omega) + E_max
   )
+}
 
-  g <- numeric(
-    n_constraints
-  )
+# Dual objective function
+dual_objective <- function(theta) {
 
-  counter <- 1
-
-  # A. Probability sum constraints
-  for (i in 1:n) {
-
-    for (j in 1:k) {
-
-      g[counter] <-
-        sum(P[i, j, ]) - 1
-
-      counter <- counter + 1
-    }
-  }
-
-  # B. Row constraints
-  for (i in 1:n) {
-
-    value <- 0
-
-    for (j in 1:k) {
-
-      for (m in 1:M) {
-
-        value <-
-          value +
-          P[i, j, m] *
-          B[i, j, m]
-      }
-    }
-
-    g[counter] <-
-      value - row_target[i]
-
-    counter <- counter + 1
-  }
-
-  # C. Column constraints
-  for (j in 1:k) {
-
-    value <- 0
-
-    for (i in 1:n) {
-
-      for (m in 1:M) {
-
-        value <-
-          value +
-          P[i, j, m] *
-          B[i, j, m]
-      }
-    }
-
-    g[counter] <-
-      value - col_target[j]
-
-    counter <- counter + 1
-  }
-
-  g
+  sum(posterior(theta)$log_Omega) -
+    sum(theta[1:n] * rt_s) -
+    sum(theta[(n + 1):(n + k)] * ct_s)
 }
 
 # ------------------------------------------------------------
-# Equality constraint Jacobian
+# Newton iterations
 # ------------------------------------------------------------
 
-eval_jac_g_eq <- function(p) {
+newton_tol     <- 1e-9   # max row/column residual (original units)
+newton_maxiter <- 200
 
-  J <- matrix(
-    0,
-    nrow = n_constraints,
-    ncol = n_variables
+theta <- rep(0, n + k)   # start: lambda = mu = 0, i.e. P = Q
+max_dual_resid <- Inf
+
+cat("  Number of multipliers (rows + columns) :", n + k, "\n")
+cat("  Iteration log (max residual in original units):\n")
+
+for (iter in 1:newton_maxiter) {
+
+  P_th <- posterior(theta)$P
+
+  # Expected value and variance of each cell (scaled units)
+  Xs <- apply(P_th * Bs,   c(1, 2), sum)
+  Vs <- apply(P_th * Bs^2, c(1, 2), sum) - Xs^2
+
+  # Gradient = row and column residuals
+  grad <- c(
+    rowSums(Xs) - rt_s,
+    colSums(Xs) - ct_s
   )
 
-  counter <- 1
+  max_dual_resid <- max(abs(grad)) * sc
 
-  # A. Probability sum constraints
-  for (i in 1:n) {
+  cat(sprintf("    iter %3d : %.3e\n", iter - 1, max_dual_resid))
 
-    for (j in 1:k) {
+  if (max_dual_resid < newton_tol) break
 
-      base <- idx(i, j)
+  # Hessian
+  H <- matrix(0, n + k, n + k)
+  diag(H)[1:n]             <- rowSums(Vs)
+  diag(H)[(n + 1):(n + k)] <- colSums(Vs)
+  H[1:n, (n + 1):(n + k)]  <- Vs
+  H[(n + 1):(n + k), 1:n]  <- t(Vs)
 
-      for (m in 1:M) {
+  # H is singular (adding c to all lambda and subtracting c from
+  # all mu gives the same solution), so the Moore-Penrose
+  # pseudo-inverse is used.
+  step <- -as.vector(MASS::ginv(H) %*% grad)
 
-        variable_index <-
-          base + (m - 1) * N
+  # Backtracking line search. The step is accepted when the dual
+  # decreases sufficiently (Armijo condition). Near the optimum,
+  # rounding error can make this test fail, so a step is also
+  # accepted if it reduces the row and column residuals.
+  f0 <- dual_objective(theta)
+  t  <- 1
 
-        J[
-          counter,
-          variable_index
-        ] <- 1
-      }
+  repeat {
 
-      counter <- counter + 1
-    }
+    theta_new <- theta + t * step
+
+    if (dual_objective(theta_new) <= f0 + 1e-4 * t * sum(grad * step)) break
+
+    P_new <- posterior(theta_new)$P
+    X_new <- apply(P_new * Bs, c(1, 2), sum)
+    grad_new <- c(rowSums(X_new) - rt_s, colSums(X_new) - ct_s)
+
+    if (max(abs(grad_new)) < max(abs(grad))) break
+
+    t <- t / 2
+    if (t < 1e-10) break
   }
 
-  # B. Row constraints
-  for (i in 1:n) {
-
-    for (j in 1:k) {
-
-      base <- idx(i, j)
-
-      for (m in 1:M) {
-
-        variable_index <-
-          base + (m - 1) * N
-
-        J[
-          counter,
-          variable_index
-        ] <- B[i, j, m]
-      }
-    }
-
-    counter <- counter + 1
-  }
-
-  # C. Column constraints
-  for (j in 1:k) {
-
-    for (i in 1:n) {
-
-      base <- idx(i, j)
-
-      for (m in 1:M) {
-
-        variable_index <-
-          base + (m - 1) * N
-
-        J[
-          counter,
-          variable_index
-        ] <- B[i, j, m]
-      }
-    }
-
-    counter <- counter + 1
-  }
-
-  J
+  theta <- theta_new
 }
 
-# ------------------------------------------------------------
-# Starting point and bounds
-# ------------------------------------------------------------
+converged <- max_dual_resid < newton_tol
 
-x0 <- as.vector(P0)
+P_opt <- posterior(theta)$P
 
-# P0 may contain exact zeros, therefore:
-# lower probability bound = 0
-lower_p <- rep(
-  0,
-  n_variables
+gce_result <- list(
+  status     = ifelse(converged, 0, 1),
+  message    = ifelse(converged,
+                      "Newton converged",
+                      "Newton did not converge"),
+  iterations = iter - 1,
+  lambda     = theta[1:n] / sc,
+  mu         = theta[(n + 1):(n + k)] / sc,
+  solution   = as.vector(P_opt)
 )
 
-upper_p <- rep(
-  1,
-  n_variables
-)
+gce_result$objective <- gce_objective(gce_result$solution)
 
-if (
-  any(x0 < lower_p - 1e-14)
-) {
+cat("  Status          :", gce_result$message, "\n")
+cat("  Newton iterations:", gce_result$iterations, "\n")
+cat("  GCE objective   :", gce_result$objective, "\n")
+
+if (!converged) {
   stop(
-    "Starting point x0 violates lower probability bounds."
-  )
-}
-
-if (
-  any(x0 > upper_p + 1e-14)
-) {
-  stop(
-    "Starting point x0 violates upper probability bounds."
-  )
-}
-
-# Verify constraints at P0
-g0 <- eval_g_eq(x0)
-
-max_initial_constraint_error <-
-  max(abs(g0))
-
-cat(
-  "  Number of optimization variables :",
-  n_variables,
-  "\n"
-)
-
-cat(
-  "  Number of equality constraints   :",
-  n_constraints,
-  "\n"
-)
-
-cat(
-  "  Maximum P0 constraint residual   :",
-  max_initial_constraint_error,
-  "\n"
-)
-
-if (
-  max_initial_constraint_error > 1e-7
-) {
-  stop(
-    "P0 is not feasible for the GCE constraints."
-  )
-}
-
-# ------------------------------------------------------------
-# Run GCE optimization
-# ------------------------------------------------------------
-
-cat("  Running SLSQP optimization...\n")
-
-opts <- list(
-  algorithm = "NLOPT_LD_SLSQP",
-  xtol_rel = 1e-10,
-  xtol_abs = 1e-10,
-  ftol_rel = 1e-10,
-  ftol_abs = 1e-10,
-  maxeval = 20000,
-  print_level = 1
-)
-
-gce_result <- nloptr(
-  x0 = x0,
-  eval_f = gce_objective,
-  eval_grad_f = gce_gradient,
-  lb = lower_p,
-  ub = upper_p,
-  eval_g_eq = eval_g_eq,
-  eval_jac_g_eq = eval_jac_g_eq,
-  opts = opts
-)
-
-cat(
-  "  NLOpt status    :",
-  gce_result$status,
-  "\n"
-)
-
-cat(
-  "  NLOpt message   :",
-  gce_result$message,
-  "\n"
-)
-
-cat(
-  "  GCE objective   :",
-  gce_result$objective,
-  "\n"
-)
-
-if (
-  gce_result$status < 0
-) {
-
-  warning(
-    paste0(
-      "NLOpt returned a negative status: ",
-      gce_result$status,
-      ". Inspect convergence diagnostics."
-    )
+    "GCE optimization did not converge (max residual = ",
+    signif(max_dual_resid, 3), "). The balancing problem is ",
+    "probably infeasible at the matrix level: revise the ",
+    "support-points matrix R or the targets."
   )
 }
 
@@ -1210,7 +843,7 @@ P <- array(
 
 
 # ============================================================
-# STEP 9 - DERIVE & VERIFY BALANCED SUT
+# STEP 7 - DERIVE & VERIFY BALANCED SUT
 # ============================================================
 #
 # Objective:
@@ -1227,7 +860,7 @@ P <- array(
 # ============================================================
 
 cat("\n------------------------------------------------------------\n")
-cat("STEP 9/10 - DERIVE & VERIFY BALANCED SUT\n")
+cat("STEP 7/8 - DERIVE & VERIFY BALANCED SUT\n")
 
 X <- matrix(
   0,
@@ -1293,7 +926,7 @@ if (
 
 
 # ============================================================
-# STEP 10 - UNCERTAINTY, RELIABILITY & OUTPUT DIAGNOSTICS
+# STEP 8 - UNCERTAINTY, RELIABILITY & OUTPUT DIAGNOSTICS
 # ============================================================
 #
 # Objective:
@@ -1312,7 +945,7 @@ if (
 # ============================================================
 
 cat("\n------------------------------------------------------------\n")
-cat("STEP 10/10 - UNCERTAINTY, RELIABILITY & OUTPUT DIAGNOSTICS\n")
+cat("STEP 8/8 - UNCERTAINTY, RELIABILITY & OUTPUT DIAGNOSTICS\n")
 
 # ------------------------------------------------------------
 # 10A. Variance, SD, entropy and reliability
@@ -1580,9 +1213,7 @@ summary_df <- data.frame(
     "5",
     "6",
     "7",
-    "8",
-    "9",
-    "10"
+    "8"
   ),
 
   Stage = c(
@@ -1590,10 +1221,8 @@ summary_df <- data.frame(
     "Orientation & consistency check",
     "Define GCE support points",
     "Feasibility screening",
-    "Feasible balanced matrix using LP/GLPK",
-    "Feasible initial probabilities P0",
     "Prior probabilities & GCE objective",
-    "GCE constrained optimization",
+    "GCE optimization (dual / Newton)",
     "Balanced SUT derivation & verification",
     "Uncertainty, reliability & diagnostics"
   ),
@@ -1603,10 +1232,8 @@ summary_df <- data.frame(
     "Completed",
     "Completed",
     "Completed",
-    ifelse(lp_result$status == 0, "Completed", "Failed"),
-    ifelse(max_P0_X_error <= 1e-8, "Completed", "Failed"),
     "Completed",
-    ifelse(gce_result$status >= 0, "Completed", "Check"),
+    ifelse(gce_result$status == 0, "Completed", "Check"),
     ifelse(
       max_row_residual <= 1e-6 &&
       max_col_residual <= 1e-6,
@@ -1624,8 +1251,8 @@ model_summary_df <- data.frame(
     "Columns",
     "Number of cells",
     "Number of support points",
-    "GLPK status",
-    "NLOpt status",
+    "Newton status (0 = converged)",
+    "Newton iterations",
     "GCE objective",
     "Maximum absolute row residual",
     "Maximum absolute column residual",
@@ -1640,8 +1267,8 @@ model_summary_df <- data.frame(
     k,
     N,
     M,
-    lp_result$status,
     gce_result$status,
+    gce_result$iterations,
     gce_result$objective,
     max_row_residual,
     max_col_residual,
@@ -1660,7 +1287,7 @@ write_xlsx(
 
   list(
 
-    PROCEDURE_10_STEPS = summary_df,
+    PROCEDURE_8_STEPS = summary_df,
 
     MODEL_SUMMARY = model_summary_df,
 
@@ -1686,14 +1313,20 @@ write_xlsx(
 
     R = R_df,
 
-    CELL_DIAGNOSTICS = cell_diag
+    CELL_DIAGNOSTICS = cell_diag,
+
+    MULTIPLIERS = data.frame(
+      Type  = c(rep("lambda (row)", n), rep("mu (column)", k)),
+      Index = c(1:n, 1:k),
+      Value = c(gce_result$lambda, gce_result$mu)
+    )
   ),
 
   output_file
 )
 
 cat("\n============================================================\n")
-cat("10-STEP GCE SUT BALANCING COMPLETED\n")
+cat("8-STEP GCE SUT BALANCING COMPLETED\n")
 cat("============================================================\n")
 cat("Output file:", output_file, "\n")
 cat("Maximum row residual   :", max_row_residual, "\n")

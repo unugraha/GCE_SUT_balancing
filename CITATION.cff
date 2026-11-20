@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "GCE_SUT_balancing: R code for Generalized Cross-Entropy balancing of Supply and Use Tables"
+version: 1.0.0
+date-released: 2026-11-20
+authors:
+  - family-names: Nugraha
+    given-names: Usep
+    affiliation: "BPS-Statistics Indonesia"
+repository-code: "https://github.com/unugraha/GCE_SUT_balancing"
+license: MIT
+keywords:
+  - supply and use tables
+  - generalized cross-entropy
+  - matrix balancing
+  - national accounts
+  - R
